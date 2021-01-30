@@ -1521,6 +1521,9 @@ int aofCreatePipes(void) {
     /* Parent -> children data is non blocking. */
     if (anetNonBlock(NULL,fds[0]) != ANET_OK) goto error;
     if (anetNonBlock(NULL,fds[1]) != ANET_OK) goto error;
+
+    // fds[2]是aof_pipe_read_ack_from_child  是读端。用于子进程要求父进程停止数据传输的消息
+    // 注册事件处理函数
     if (aeCreateFileEvent(server.el, fds[2], AE_READABLE, aofChildPipeReadable, NULL) == AE_ERR) goto error;
 
     server.aof_pipe_write_data_to_child = fds[1];
@@ -1565,12 +1568,22 @@ void aofClosePipes(void) {
  *    data accumulated into server.aof_rewrite_buf into the temp file, and
  *    finally will rename(2) the temp file in the actual file name.
  *    The the new file is reopened as the new append only file. Profit!
+ * BGREWRITEAOF工作机制
+ * 1) 客户端请求BGREWRITEAOF命令
+ * 2)redis使用fork创建一个子进程：
+ *      2a. 子进程会在一个临时文件中，进行aof重写
+ *      2b. 父进程会把aof重写期间的写操作记录到server.aof_rewrite_buf中
+ * 3) 子进程完成2a的操作，退出
+ * 4) 父进程会捕获到子进程的退出，父进程会把放在server.aof_rewrite_buf中的
+ *    差异数据追加的子进程创建的临时文件中，并把这个临时文件进行重命名，替换掉原有aof文件
  */
 int rewriteAppendOnlyFileBackground(void) {
     pid_t childpid;
     long long start;
 
+    // 判断此时是否在执行AOF/RDB，
     if (server.aof_child_pid != -1 || server.rdb_child_pid != -1) return C_ERR;
+    // 创建父子进程之间的pipe
     if (aofCreatePipes() != C_OK) return C_ERR;
     openChildInfoPipe();
     start = ustime();
